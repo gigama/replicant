@@ -1,5 +1,7 @@
 # replicant
 
+## Local RSS Reader App
+
 **What's in the box:**
 
 `replicant.py` is a self-contained ~500-line Flask app. The full-page HTML/CSS/JS is embedded as a string so there are no template folders to manage.
