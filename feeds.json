@@ -1,0 +1,16 @@
+{
+  "feeds": [
+    {
+      "url": "https://feeds.arstechnica.com/arstechnica/index",
+      "name": "Ars Technica - All content"
+    },
+    {
+      "url": "https://news.ycombinator.com/rss",
+      "name": "Hacker News"
+    },
+    {
+      "url": "https://www.theverge.com/rss/index.xml",
+      "name": "The Verge"
+    }
+  ]
+}

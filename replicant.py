@@ -13,7 +13,7 @@ import threading
 import webbrowser
 import logging
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # ── Dependency check ─────────────────────────────────────────────────────────
@@ -105,7 +105,7 @@ def _parse_date(entry) -> str:
                 return datetime(*t[:6]).isoformat()
             except Exception:
                 pass
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 def _entry_summary(entry) -> str:
     raw = ""
@@ -176,23 +176,27 @@ def fetch_feeds() -> int:
                     "first_para":   "",
                     "full_author":  "",
                     "full_tags":    [],
-                    "fetched_at":   datetime.utcnow().isoformat(),
+                    "fetched_at":   datetime.now(timezone.utc).isoformat(),
                 }
                 new_count += 1
 
         except Exception as exc:
             log.warning(f"Error fetching feed {url}: {exc}")
 
-    db["last_fetch"] = datetime.utcnow().isoformat()
+    db["last_fetch"] = datetime.now(timezone.utc).isoformat()
 
     # Prune articles older than RETAIN_DAYS (unless kept or saved)
-    cutoff = datetime.utcnow() - timedelta(days=RETAIN_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RETAIN_DAYS)
     pruned = []
     for k, a in list(db["articles"].items()):
         if a.get("keep") or a.get("saved"):
             continue
         try:
-            if datetime.fromisoformat(a["fetched_at"]) < cutoff:
+            ft = datetime.fromisoformat(a["fetched_at"])
+            # treat naive stored timestamps as UTC
+            if ft.tzinfo is None:
+                ft = ft.replace(tzinfo=timezone.utc)
+            if ft < cutoff:
                 pruned.append(k)
         except Exception:
             pass
@@ -210,7 +214,10 @@ def should_fetch() -> bool:
     if not last:
         return True
     try:
-        diff = datetime.utcnow() - datetime.fromisoformat(last)
+        last_dt = datetime.fromisoformat(last)
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        diff = datetime.now(timezone.utc) - last_dt
         return diff.total_seconds() > FETCH_INTERVAL_HOURS * 3600
     except Exception:
         return True
@@ -346,7 +353,7 @@ def save_to_markdown(art_id: str) -> tuple:
 
     safe_title = re.sub(r"[^\w\s-]", "", art["title"])[:60].strip()
     safe_title = re.sub(r"\s+", "_", safe_title)
-    date_str = (art.get("date") or datetime.utcnow().isoformat())[:10]
+    date_str = (art.get("date") or datetime.now(timezone.utc).isoformat())[:10]
     filename = f"{date_str}_{safe_title}.md"
     filepath = ARTICLES_DIR / filename
 
@@ -389,7 +396,7 @@ def _regenerate_toc():
     )
     lines = [
         "# Saved Articles — Table of Contents\n\n",
-        f"*Updated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · "
+        f"*Updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
         f"{len(saved)} article(s)*\n\n",
         "| Date | Title | Source | Author | Tags |\n",
         "|------|-------|--------|--------|------|\n",
@@ -414,7 +421,9 @@ def _is_visible(art: dict) -> bool:
         return True
     try:
         read_dt = datetime.fromisoformat(art["read_at"])
-        return (datetime.utcnow() - read_dt) < timedelta(days=VISIBLE_AFTER_READ_DAYS)
+        if read_dt.tzinfo is None:
+            read_dt = read_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - read_dt) < timedelta(days=VISIBLE_AFTER_READ_DAYS)
     except Exception:
         return True
 
@@ -643,6 +652,16 @@ body {
 .rcontent figure { margin: 1em 0; }
 .rcontent figcaption { font-size: .85em; color: var(--text2); margin-top: .3em; }
 .spinner { text-align:center; padding: 2rem; color: var(--text3); font-style: italic; font-size: .9rem; }
+.rpane-footer {
+  margin-top: 2rem; padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.btn-close-bottom {
+  background: none; border: 1px solid var(--border2); color: var(--text2);
+  font-size: .82rem; font-weight: 600; padding: .35rem 1rem;
+  border-radius: 7px; cursor: pointer; transition: all .15s;
+}
+.btn-close-bottom:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 /* ── Inner pages ── */
 .page { max-width: 780px; margin: 0 auto; padding: 1.8rem 1.2rem 4rem; }
@@ -882,7 +901,10 @@ async function openReader(id, btn) {
       const sm = document.getElementById('sm-' + id);
       if (sm && !sm.textContent.trim()) sm.textContent = d.first_para;
     }
-    pane.innerHTML = `<div class="rcontent">${d.html}</div>`;
+    pane.innerHTML = `<div class="rcontent">${d.html}</div>
+<div class="rpane-footer">
+  <button class="btn btn-close-bottom" onclick="openReader('${id}', document.getElementById('rb-${id}'))">↑ Close Reader</button>
+</div>`;
     btn.textContent = 'Close Reader';
     btn.disabled = false;
     // Show save button
@@ -902,16 +924,35 @@ async function markRead(id) {
 }
 
 async function toggleKeep(id) {
-  const r = await fetch('/api/article/' + id + '/keep', {method:'POST'});
-  const d = await r.json();
-  const btn  = document.getElementById('kb-' + id);
+  const kbtn = document.getElementById('kb-' + id);
   const card = document.getElementById('c-' + id);
-  if (d.keep) {
-    btn.textContent = '★ Kept';
-    card.className = card.className.replace(/c-saved|c-keep/g,'').trim() + ' c-keep';
-  } else {
-    btn.textContent = '☆ Keep';
-    card.className = card.className.replace('c-keep','').trim();
+  const wasKeeping = kbtn.textContent.includes('★');
+  kbtn.textContent = 'Working…';
+  kbtn.disabled = true;
+  try {
+    const r = await fetch('/api/article/' + id + '/keep', {method:'POST'});
+    const d = await r.json();
+    kbtn.disabled = false;
+    if (d.keep) {
+      kbtn.textContent = '★ Kept';
+      card.className = card.className.replace(/c-saved|c-keep/g,'').trim() + ' c-keep';
+      const sb = document.getElementById('sb-' + id);
+      if (d.saved && d.filename) {
+        if (sb) { sb.textContent = '✓ Saved'; sb.style.display = ''; sb.disabled = true; }
+        toast('Kept & saved → articles/' + d.filename);
+      } else if (d.error) {
+        toast('Kept — save needs reader open first', false);
+      } else {
+        toast('Article kept');
+      }
+    } else {
+      kbtn.textContent = '☆ Keep';
+      card.className = card.className.replace('c-keep','').trim();
+    }
+  } catch(e) {
+    kbtn.disabled = false;
+    kbtn.textContent = wasKeeping ? '★ Kept' : '☆ Keep';
+    toast('Could not update keep state', true);
   }
 }
 
@@ -1118,7 +1159,7 @@ def api_read(aid):
     a  = db["articles"].get(aid)
     if a and not a.get("read"):
         a["read"]    = True
-        a["read_at"] = datetime.utcnow().isoformat()
+        a["read_at"] = datetime.now(timezone.utc).isoformat()
         save_db(db)
     return jsonify({"ok": True})
 
@@ -1128,9 +1169,42 @@ def api_keep(aid):
     a  = db["articles"].get(aid)
     if not a:
         return jsonify({"error": "Not found"}), 404
-    a["keep"] = not a.get("keep", False)
+
+    new_keep = not a.get("keep", False)
+    a["keep"] = new_keep
     save_db(db)
-    return jsonify({"keep": a["keep"]})
+
+    result = {"keep": new_keep, "saved": a.get("saved", False),
+              "filename": a.get("saved_file", ""), "error": ""}
+
+    # When marking as kept, auto-fetch content (if needed) and save to markdown
+    if new_keep:
+        if not a.get("full_content"):
+            try:
+                fetched = fetch_article_content(a["url"])
+                a["full_content"] = fetched["html"]
+                a["first_para"]   = fetched["first_para"]
+                if fetched["author"]:  a["full_author"] = fetched["author"]
+                if fetched["tags"]:    a["full_tags"]   = fetched["tags"]
+                if not a.get("summary") and fetched["first_para"]:
+                    a["summary"] = fetched["first_para"]
+                save_db(db)
+            except Exception as exc:
+                log.warning(f"Keep: could not fetch content for {aid}: {exc}")
+
+        if not a.get("saved"):
+            filename, err = save_to_markdown(aid)
+            if err:
+                result["error"] = err
+            else:
+                result["saved"]    = True
+                result["filename"] = filename
+        else:
+            # Already saved previously; just report the existing file
+            result["saved"]    = True
+            result["filename"] = a.get("saved_file", "")
+
+    return jsonify(result)
 
 @app.route("/api/article/<aid>/dismiss", methods=["POST"])
 def api_dismiss(aid):
