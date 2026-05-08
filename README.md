@@ -3,7 +3,7 @@
 A self-hosted, privacy-respecting RSS reader that runs entirely on your own machine
 and displays articles in your browser — without ads, tracking scripts, or third-party
 requests. Articles you want to keep are exported as clean Markdown files with full
-metadata front matter.
+metadata front matter and automatically listed in a table of contents.
 
 ```
 python replicant.py
